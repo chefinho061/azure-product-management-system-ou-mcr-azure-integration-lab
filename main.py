@@ -3,73 +3,106 @@ from azure.storage.blob import BlobServiceClient
 import os 
 import pymysql
 import uuid
-import json
-
-
 from dotenv import load_dotenv
-load_dotenv()  # Carrega as variáveis do seu arquivo .env
-BlobConnectionString = os.getenv("BLOB_CONNECTIOPN_STRING")
-BlobContainerName = os.getenv("BLOB_CONTAINER_NAME")
-Blobaccountname = os.getenv("BLOB_ACCOUNT_NAME")
 
-SQL_Server = os.getenv("SQL_SERVER")
-SQL_Database = os.getenv("SQL_DATABASE")
-SQL_User = os.getenv("SQL_USER")
-SQL_Password = os.getenv("SQL_PASSWORD")
+# --- CONFIGURAÇÃO DA IDENTIDADE VISUAL ---
+st.set_page_config(page_title="MCR - Cloud Catalog", page_icon="📦", layout="wide")
 
-st.title("cadastro de produtos")
-#formulário para cadastro de produtos
-product_name = st.text_input("Nome do produto")
-product_description = st.text_area("Descrição do produto")
-product_price = st.number_input("Preço do produto", min_value=0.0, format="%.2f")
-product_image = st.file_uploader("Imagem do produto", type=["jpg", "jpeg", "png"])
+# Inicialização de variáveis de ambiente
+load_dotenv()
 
-#salvar produto no banco de dados e imagem no blob storage
+# Credenciais Cloud
+BLOB_CONN = os.getenv("BLOB_CONNECTIOPN_STRING")
+BLOB_CONT = os.getenv("BLOB_CONTAINER_NAME")
+BLOB_ACC = os.getenv("BLOB_ACCOUNT_NAME")
 
-def upload_image_to_blob(image_file):
-    blob_service_client = BlobServiceClient.from_connection_string(BlobConnectionString)
-    container_client = blob_service_client.get_container_client(BlobContainerName)
-    blob_name = f"{uuid.uuid4()}_{image_file.name}"
-    blob_client = container_client.get_blob_client(blob_name)
-    blob_client.upload_blob(image_file.read(), overwrite=True)
-    image_url = f"https://{Blobaccountname}.blob.core.windows.net/{BlobContainerName}/{blob_name}"
-    return image_url
+DB_HOST = os.getenv("SQL_SERVER")
+DB_NAME = os.getenv("SQL_DATABASE")
+DB_USER = os.getenv("SQL_USER")
+DB_PASS = os.getenv("SQL_PASSWORD")
 
+# --- MÓDULO DE INFRAESTRUTURA (Lógica Única) ---
 
-def insert_product(product_name, product_description, product_price, image_url):
-    connection = pymysql.connect(
-        host=SQL_Server,
-        user=SQL_User,
-        password=SQL_Password,
-        database=SQL_Database
-    )
-    cursor = connection.cursor()
-    cursor.execute("insert into products (nome, descricao, preco, image_url) values (%s, %s, %s, %s)", (product_name, product_description, product_price, image_url))
+def azure_cloud_integration(image_file):
+    """Gerencia o upload para o Blob Storage com tratamento de erro."""
     try:
-        with connection.cursor() as cursor:
-            insert_sql = "INSERT INTO produtos (name, descricao, preco, image_url) VALUES (%s, %s, %s, %s)"
-            cursor.execute(insert_sql, (product_name, product_description, product_price, image_url))
-        connection.commit()
-    finally:
-        connection.close()
+        service_client = BlobServiceClient.from_connection_string(BLOB_CONN)
+        container_client = service_client.get_container_client(BLOB_CONT)
+        
+        # Gerar identificador único MCR
+        unique_name = f"mcr_product_{uuid.uuid4().hex[:8]}_{image_file.name}"
+        blob_client = container_client.get_blob_client(unique_name)
+        
+        blob_client.upload_blob(image_file.read(), overwrite=True)
+        return f"https://{BLOB_ACC}.blob.core.windows.net/{BLOB_CONT}/{unique_name}"
+    except Exception as e:
+        st.error(f"Falha Crítica no Blob Storage: {e}")
+        return None
 
-def list_products():
-    connection = pymysql.connect(
-        host=SQL_Server,
-        user=SQL_User,
-        password=SQL_Password,
-        database=SQL_Database
-    )
-    cursor = connection.cursor()
-    cursor.execute("SELECT name, descricao, preco, image_url FROM produtos")
-    products = cursor.fetchall()
-    connection.close()
-    return products
+def db_transaction_handler(p_name, p_desc, p_price, p_url):
+    """Executa a transação SQL garantindo o fechamento da conexão."""
+    try:
+        conn = pymysql.connect(
+            host=DB_HOST, user=DB_USER, password=DB_PASS, 
+            database=DB_NAME, cursorclass=pymysql.cursors.DictCursor
+        )
+        with conn.cursor() as cursor:
+            # SQL parametrizado para evitar SQL Injection
+            sql = "INSERT INTO produtos (name, descricao, preco, image_url) VALUES (%s, %s, %s, %s)"
+            cursor.execute(sql, (p_name, p_desc, p_price, p_url))
+        conn.commit()
+        conn.close()
+        return True
+    except pymysql.MySQLError as err:
+        st.error(f"Erro de Banco de Dados [MCR-SQL]: {err}")
+        return False
 
-if st.button("Salvar produto"):
-    insert_product(product_name, product_description, product_price, upload_image_to_blob(product_image))
-    return_message = "Produto salvo com sucesso!"
+# --- INTERFACE DE USUÁRIO (CUSTOM) ---
 
-    st.header("Produto cadastrado:")
-    if st.button("Listar produtos"):
-        return_message = "Produtos listados com sucesso!"
+st.title("🛡️ Sistema de Gestão de Ativos - MCR")
+st.subheader("Integração Híbrida: Azure SQL + Blob Storage")
+
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.info("Formulário de Entrada de Dados")
+    name = st.text_input("Etiqueta do Produto", placeholder="Ex: Câmera Industrial")
+    desc = st.text_area("Especificações Técnicas", placeholder="Descreva os detalhes do hardware...")
+    price = st.number_input("Valor de Ativo (R$)", min_value=0.0)
+    file = st.file_uploader("Evidência Visual (Imagem)", type=["png", "jpg", "jpeg"])
+
+with col2:
+    st.info("Status de Sincronização")
+    if st.button("🚀 Processar e Sincronizar com Azure"):
+        if name and file:
+            with st.spinner("Estabelecendo conexão com Azure Cloud..."):
+                # Etapa 1: Blob
+                image_url = azure_cloud_integration(file)
+                
+                if image_url:
+                    # Etapa 2: SQL
+                    success = db_transaction_handler(name, desc, price, image_url)
+                    
+                    if success:
+                        st.toast("Dados replicados com sucesso!", icon='✅')
+                        st.success(f"Ativo '{name}' catalogado na nuvem.")
+                        st.balloons()
+        else:
+            st.warning("⚠️ Erro de Validação: Nome e Imagem são campos obrigatórios.")
+
+# --- SEÇÃO DE LISTAGEM ---
+st.markdown("---")
+if st.checkbox("🔍 Visualizar Catálogo de Produtos"):
+    try:
+        conn = pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME)
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT name, descricao, preco, image_url FROM produtos")
+            data = cursor.fetchall()
+            for row in data:
+                with st.expander(f"Produto: {row[0]}"):
+                    st.write(f"**Preço:** R$ {row[2]}")
+                    st.write(f"**Descrição:** {row[1]}")
+                    st.image(row[3], width=200)
+        conn.close()
+    except Exception as e:
+        st.write(f"Aguardando sincronização de dados... Erro: {e}")
